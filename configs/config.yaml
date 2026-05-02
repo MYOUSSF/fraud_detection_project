@@ -1,0 +1,61 @@
+# ── Paths ──────────────────────────────────────────────────────────────────────
+paths:
+  raw_dir:       data/raw
+  processed_dir: data/processed
+  models_dir:    models
+  outputs_dir:   outputs
+  mlruns_dir:    mlruns
+
+# ── Data ───────────────────────────────────────────────────────────────────────
+data:
+  train_transaction: train_transaction.csv
+  train_identity:    train_identity.csv
+  test_size:         0.2
+  random_state:      42
+
+# ── Features ───────────────────────────────────────────────────────────────────
+features:
+  n_v_features: 28          # number of V-columns to use
+
+# ── Graph ──────────────────────────────────────────────────────────────────────
+graph:
+  max_merchant_size: 500    # skip merchants with > N cards (speed)
+  pagerank_alpha:    0.85
+  pagerank_iters:    100
+  pagerank_tol:      1.0e-6
+
+# ── LightGBM ───────────────────────────────────────────────────────────────────
+lgb:
+  objective:         binary
+  metric:            average_precision
+  boosting_type:     gbdt
+  n_estimators:      2000
+  learning_rate:     0.03
+  num_leaves:        63
+  min_child_samples: 20
+  subsample:         0.8
+  subsample_freq:    1
+  colsample_bytree:  0.8
+  reg_alpha:         0.1
+  reg_lambda:        1.0
+  early_stopping_rounds: 100
+  device:            cpu     # set to 'gpu' if available
+  n_shap_samples:    2000    # stratified sample for SHAP computation
+
+# ── Training ───────────────────────────────────────────────────────────────────
+training:
+  cv_folds:     5
+  random_state: 42
+
+# ── Evaluation ─────────────────────────────────────────────────────────────────
+evaluation:
+  cost_fn:          150.0   # cost of a missed fraud (false negative)
+  cost_fp:          5.0     # cost of a false alarm  (false positive)
+  precision_at_k:   [10, 25, 50, 100, 200, 500]
+  plot_dpi:         150
+  time_period_days: 7       # window size for time-period AUROC/cost analysis
+
+# ── MLflow ─────────────────────────────────────────────────────────────────────
+mlflow:
+  experiment_name: fraud-detection
+  run_name:        ~        # null = auto-generated timestamp name
