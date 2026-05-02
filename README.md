@@ -3,8 +3,8 @@
 End-to-end fraud detection system: feature engineering → XGBoost + LightGBM ensemble with graph features → real-time scoring API.
 
 ```
-Ensemble AUROC     : 0.8065  |  Ensemble AUPRC : 0.1943
-XGBoost  AUROC     : 0.7984  |  LightGBM AUROC : 0.8029
+LightGBM AUROC     : 0.8849  |  LightGBM AUPRC  : 0.3871
+Brier raw          : 0.0899  |  Brier calibrated : 0.0263
 API latency target : < 100 ms  (typical: 5–20 ms)
 ```
 
@@ -182,11 +182,10 @@ python scripts/run_pipeline.py --run-name baseline_v1
 | Stage | Module | Measured runtime | Key outputs |
 |---|---|---|---|
 | `eda` | `eda.py` | ~6 s | `outputs/eda/*.png` |
-| `features` | `features.py` | ~15 s | `data/processed/X_*.npy`, `scaler.pkl` |
+| `features` | `features.py` | ~6 s | `data/processed/X_*.npy`, `scaler.pkl` |
 | `graph` | `graph.py` | ~7 s | `data/processed/graph_*.npy` |
-| `train` | `models.py` | ~29 min | `models/xgb_model.pkl`, `test_scores.npy` |
-| `ensemble` | `ensemble.py` + `evaluate.py` | ~21 min | `models/ensemble.pkl`, dashboard, SHAP |
-| **Total** | | **~33 min** | |
+| `train` | `ensemble.py` + `evaluate.py` | ~3.5 min | `models/lgb_model.pkl`, dashboard, SHAP, calibration |
+| **Total** | | **~4 min** | |
 
 ### Feature engineering
 
@@ -217,47 +216,83 @@ python scripts/run_pipeline.py --run-name baseline_v1
 
 ## Results
 
-Benchmarked on the IEEE-CIS test split (118,108 transactions, 3.50% fraud) — MLflow run `a4451478a4c043639e46948e52f7eea6`.
+Benchmarked on the IEEE-CIS test split (118,108 transactions, 3.50% fraud) — pipeline runtime 230.7 s (~4 min).
 
 ### Model performance
 
-| Model | AUROC | AUPRC | CV mean ± std |
-|---|---|---|---|
-| XGBoost | 0.7984 | 0.1697 | 0.7946 ± 0.0038 |
-| LightGBM | 0.8029 | 0.1920 | 0.7971 ± 0.0038 |
-| **Ensemble** | **0.8065** | **0.1943** | 0.8064 ± 0.0037 |
+| Metric | Value |
+|---|---|
+| AUROC | **0.8849** |
+| AUPRC | **0.3871** |
+| CV mean ± std | 0.8800 ± 0.0032 |
+| OOF AUROC | 0.8800 |
+| Brier score (raw) | 0.0899 |
+| Brier score (calibrated) | **0.0263** |
 
-Random baseline AUPRC (3.5% prevalence): ~0.035. The ensemble is 5.5× above baseline.
+Random baseline AUPRC (3.5% prevalence): ~0.035. LightGBM is 11× above baseline on AUPRC.
 
-### Classification report (F1-optimal threshold = 0.823)
+### Classification report (F1-optimal threshold = 0.784)
 
 | Class | Precision | Recall | F1 | Support |
 |---|---|---|---|---|
-| Normal | 0.98 | 0.96 | 0.97 | 113,975 |
-| Fraud | 0.22 | 0.34 | 0.27 | 4,133 |
-| Weighted avg | 0.95 | 0.94 | 0.94 | 118,108 |
+| Normal | 0.98 | 0.98 | 0.98 | 113,975 |
+| **Fraud** | **0.38** | **0.42** | **0.40** | 4,133 |
+| Weighted avg | 0.96 | 0.96 | 0.96 | 118,108 |
 
 ### Thresholds
 
 | Threshold | Value | Use case |
 |---|---|---|
-| F1-optimal | 0.823 | Maximises F1 on fraud class |
-| Cost-optimal | 0.517 | Minimises `FN × $150 + FP × $5` — recommended for production |
+| F1-optimal | 0.784 | Maximises F1 on the fraud class |
+| Cost-optimal | 0.306 | Minimises `FN × $150 + FP × $5` — recommended for production |
 
-The high F1-optimal threshold (0.823) reflects that the model is conservative — it rarely assigns very high fraud probabilities. The cost-optimal threshold is more practical: at 0.517, the trade-off between catching fraud ($150 miss cost) and false alarms ($5 investigation cost) is minimised.
+The cost-optimal threshold of 0.306 is operationally practical — the model now assigns meaningfully high probabilities to fraud, unlike the previous ensemble where the F1 threshold was 0.823.
 
-### Precision@K (ensemble, cost-optimal threshold)
+### Precision@K
 
-| K | Precision |
+Top-scored transactions are overwhelmingly fraudulent — the first 25 flagged are all fraud.
+
+| K | Precision | Lift over baseline |
+|---|---|---|
+| 10 | 1.0000 | 28.6× |
+| 25 | 1.0000 | 28.6× |
+| 50 | 0.9200 | 26.3× |
+| 100 | 0.9000 | 25.7× |
+| 200 | 0.9000 | 25.7× |
+| 500 | 0.8060 | 23.0× |
+
+### Calibration
+
+Isotonic regression post-hoc calibration reduces the Brier score from 0.0899 to 0.0263 — a 71% improvement. This makes the output probabilities well-suited for threshold selection and cost analysis at deployment time.
+
+### Graph feature fraud separation (KS test)
+
+| Feature | KS stat | Normal mean | Fraud mean |
+|---|---|---|---|
+| `g_avg_amount` | 0.257 | −0.027 | −0.486 |
+| `g_clustering` | 0.199 | 0.094 | 0.294 |
+| `g_pagerank` | 0.199 | 0.935 | 2.924 |
+| `g_card_degree` | 0.155 | −0.227 | −0.405 |
+| `g_merchant_diversity` | 0.096 | 1.033 | 0.811 |
+| `g_amount_var` | 0.057 | 0.282 | 0.417 |
+| `g_card_weighted_degree` | 0.054 | 0.536 | 0.468 |
+
+Fraud cards have markedly higher PageRank (2.92 vs 0.94) and clustering (0.29 vs 0.09), indicating they are more central in the card-merchant co-occurrence network — a behavioural fingerprint of fraud rings.
+
+### EDA key findings
+
+| Finding | Value |
 |---|---|
-| 10 | — |
-| 25 | — |
-| 50 | — |
-| 100 | — |
-| 200 | — |
-| 500 | — |
+| Dataset span | 590,540 transactions over **183 days** |
+| Fraud rate | 3.499% (20,663 fraud transactions) |
+| Unique cardholders | 13,553 |
+| Cards with ≥1 fraud tx | 1,740 (12.8% of cards) |
+| Cards >50% fraud | 288 — likely compromised cards |
+| Peak fraud hour | **7:00** (10.61% fraud rate) |
+| Lowest fraud hour | 13:00 (2.29% fraud rate) |
+| log(Amount) vs fraud correlation | 0.0018 — amount alone is a weak signal |
 
-> Re-run `scripts/run_pipeline.py --stages ensemble` to populate Precision@K values from MLflow.
+Top V-features by KS statistic vs fraud label: V15 (0.327), V16 (0.326), V18 (0.318), V17 (0.318), V22 (0.315).
 
 ### Data summary
 
@@ -265,8 +300,6 @@ The high F1-optimal threshold (0.823) reflects that the model is conservative �
 |---|---|---|---|
 | Train | 472,432 | 16,530 | 3.50% |
 | Test | 118,108 | 4,133 | 3.50% |
-| Sequences (train) | 54,126 | 1,924 | 3.55% |
-| Sequences (test) | 13,412 | 429 | 3.20% |
 | Graph nodes (cards) | 13,553 | — | — |
 | Graph edges | 6,283 | — | — |
 
@@ -276,19 +309,20 @@ The high F1-optimal threshold (0.823) reflects that the model is conservative �
 
 Each pipeline run logs:
 
-**Parameters** — all `config.yaml` values flattened (`xgb.learning_rate`, `lgb.num_leaves`, etc.)
+**Parameters** — all `config.yaml` values flattened (`lgb.learning_rate`, `lgb.num_leaves`, etc.)
 
 **Metrics**
-- Per-fold CV AUROC for XGBoost, LightGBM, and ensemble
-- Test AUROC and AUPRC for all three models
+- Per-fold CV AUROC for LightGBM (5 folds)
+- Test AUROC, AUPRC, Brier score (raw and calibrated)
 - Precision@K (K = 10, 25, 50, 100, 200, 500)
 - Cost-optimal threshold and minimum dollar cost
+- AUROC first/last/std across weekly time periods
 - Stage runtimes
 
 **Artefacts**
-- `xgb_model.pkl`, `lgb_model.pkl`, `ensemble.pkl`
-- Evaluation dashboard, SHAP importance, SHAP waterfall
-- `ensemble_results.json`
+- `lgb_model.pkl`
+- Evaluation dashboard, calibration plot, Precision@K plot, time-period analysis, SHAP plots
+- `lgb_results.json`
 
 ### Viewing runs
 
