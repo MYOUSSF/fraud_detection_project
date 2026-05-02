@@ -13,7 +13,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
@@ -56,27 +56,29 @@ def calibrate(
     y_test: np.ndarray,
     cfg: dict[str, Any],
 ) -> tuple[Any, np.ndarray]:
-    """Fit an isotonic calibrator on the test scores; return calibrated model + scores.
+    """Fit an isotonic calibrator on the raw test scores.
 
-    Uses CalibratedClassifierCV with cv='prefit' so the base model is not
-    retrained — only the calibration layer is fitted on the test set.
-    This is appropriate for a final held-out evaluation where we want
-    calibrated probabilities for threshold selection and cost analysis.
+    CalibratedClassifierCV(cv='prefit') was removed in scikit-learn 1.4.
+    We instead fit IsotonicRegression directly on the raw probabilities —
+    functionally identical to isotonic post-hoc calibration.
 
-    Note: in a strict production setup you would calibrate on a separate
-    calibration split, not the test set.  For prototyping this is acceptable.
+    Note: calibrating on the test set is acceptable for prototyping/evaluation.
+    In production, use a separate held-out calibration split.
     """
-    rs = cfg["training"]["random_state"]
-    calibrated = CalibratedClassifierCV(model, cv="prefit", method="isotonic")
-    calibrated.fit(X_test, y_test)
-    cal_scores = calibrated.predict_proba(X_test)[:, 1]
-    brier_raw = float(brier_score_loss(y_test, model.predict_proba(X_test)[:, 1]))
+    from sklearn.isotonic import IsotonicRegression
+
+    raw_scores = model.predict_proba(X_test)[:, 1]
+    iso = IsotonicRegression(out_of_bounds="clip")
+    iso.fit(raw_scores, y_test)
+    cal_scores = iso.predict(raw_scores).astype(np.float64)
+
+    brier_raw = float(brier_score_loss(y_test, raw_scores))
     brier_cal = float(brier_score_loss(y_test, cal_scores))
     logger.info(
         "Calibration — Brier score: raw=%.4f  calibrated=%.4f  (lower is better)",
         brier_raw, brier_cal,
     )
-    return calibrated, cal_scores
+    return iso, cal_scores
 
 
 def plot_calibration(
