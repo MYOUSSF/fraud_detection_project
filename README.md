@@ -196,14 +196,27 @@ python scripts/run_pipeline.py --run-name baseline_v1
 - `rolling_amount_mean_3`: 3-transaction rolling log-amount mean
 - `amount_vs_mean`: deviation from rolling mean
 
-**Graph features (7)** — built on a card-merchant bipartite graph:
-- `g_card_degree`: number of unique merchants visited
-- `g_card_weighted_degree`: total transaction count
-- `g_clustering`: local clustering coefficient
-- `g_pagerank`: PageRank centrality
-- `g_avg_amount`: mean log-amount per card
-- `g_amount_var`: variance of log-amount
-- `g_merchant_diversity`: degree / weighted degree
+**Graph features (7)** — built on a card-merchant co-occurrence graph
+
+The graph pipeline never stores a bipartite graph explicitly. Instead it groups cards by shared merchant category and projects directly to a **card-card co-occurrence matrix** `A` of shape `(13,553 × 13,553)` where `A[i,j] = 1` if card `i` and card `j` both transacted at the same merchant category. Seven features are then derived from this matrix and from per-card transaction statistics.
+
+**Merchant identity** is a coarse synthetic label `ProductCD + "_" + card4 + "_M"` — for example `W_visa_M` means "web purchase on a Visa card." This gives at most ~25 distinct merchant categories across the dataset. Merchant groups with more than 500 cards are dropped to avoid noise and memory blow-up.
+
+The seven features and their fraud-signal rationale:
+
+| Feature | Computation | Normal mean | Fraud mean | KS | What it captures |
+|---|---|---|---|---|---|
+| `g_card_degree` | `nunique(merchant_id)` per card | −0.227 | −0.405 | 0.155 | How many distinct merchant categories the card visited. Fraud cards tend to concentrate at fewer categories. |
+| `g_card_weighted_degree` | Total transaction count per card | 0.536 | 0.468 | 0.054 | Raw activity volume. Weakest discriminator alone but useful in combination with degree. |
+| `g_clustering` | `2 × triangles(u) / (deg(u) × (deg(u)−1))` | 0.094 | 0.294 | 0.199 | What fraction of a card's co-occurrence neighbours are also connected to each other. High clustering means the card sits inside a tight cluster of cards that all share multiple merchants — a hallmark of fraud rings where compromised cards are used at the same small set of terminals. Computed via sparse matrix multiplication: `(A ⊙ (A²)ᵀ).sum(axis=1) / 2`. |
+| `g_pagerank` | Power iteration on column-normalised `A`, α=0.85 | 0.935 | 2.924 | 0.199 | Centrality in the co-occurrence network. A card with high PageRank transacts at merchants shared by many other well-connected cards. Fraud cards average 3× the PageRank of normal cards — consistent with point-of-sale breaches where many cards are compromised from the same merchant terminal, making all those cards central in the graph. |
+| `g_avg_amount` | Mean `log(1+Amount)` per card | −0.027 | −0.486 | 0.257 | Average spend level. Strongest graph discriminator (KS=0.257). Fraud cards spend less on average — a signature of card-testing behaviour where small purchases ($1–$5) are made to verify a stolen card works before a larger fraudulent charge. |
+| `g_amount_var` | Variance of `log(1+Amount)` per card | 0.282 | 0.417 | 0.057 | Spending volatility. Fraud cards are more erratic — mixing small test charges with occasional large ones produces higher variance than the stable spending patterns of legitimate cardholders. |
+| `g_merchant_diversity` | `g_card_degree / g_card_weighted_degree` | 1.033 | 0.811 | 0.096 | Ratio of unique merchants to total transactions. A card that makes 10 transactions at 8 different merchants scores 0.8; one that makes 10 transactions at a single merchant scores 0.1. Fraud cards are slightly more concentrated (lower diversity), though this is the weakest graph feature. |
+
+All values shown are post-scaling (RobustScaler fitted on training set, clipped to ±10).
+
+**Important:** the 6,283 figure logged as `nnz` during graph construction is the number of edges in the **projected card-card matrix** `A`, not in the bipartite graph. Every one of the 13,553 card nodes has at least one transaction — the sparsity arises because the 500-card merchant cap drops large groups entirely, leaving many cards with zero co-occurrence edges (degree 0 in `A`). Those cards receive `g_clustering = 0` and `g_pagerank = 1/N` (the uniform prior).
 
 ### Leakage controls
 
